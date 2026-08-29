@@ -14,17 +14,15 @@ import { loadEnv } from './lib.js';
 
 const app = new Hono<AppBindings>();
 
-app.use('*', async (c, next) => {
+app.get('/health', (c) => c.json({ ok: true, service: 'headquarters-billing' }));
+
+app.use('/v1/*', async (c, next) => {
 	try {
 		initContext(c);
 	} catch (err) {
 		console.error(err);
 		return c.json({ error: 'Server misconfigured' }, 500);
 	}
-	await next();
-});
-
-app.use('/v1/*', async (c, next) => {
 	const env = c.get('env');
 	const corsMiddleware = cors({
 		origin: (origin) => {
@@ -38,23 +36,21 @@ app.use('/v1/*', async (c, next) => {
 	return corsMiddleware(c, next);
 });
 
-app.get('/health', (c) => c.json({ ok: true, service: 'headquarters-billing' }));
-
 app.post('/v1/checkout', createCheckoutSession);
 app.post('/v1/webhooks/stripe', handleStripeWebhook);
 app.get('/v1/claim', lookupClaim);
 app.post('/v1/claim', claimSubscription);
 app.get('/v1/entitlement', entitlementForUser);
 
-const env = (() => {
-	try {
-		return loadEnv();
-	} catch (err) {
-		console.error(err);
-		process.exit(1);
-	}
-})();
+const port = Number(process.env.PORT ?? '8080');
 
-serve({ fetch: app.fetch, port: env.port }, (info) => {
+serve({ fetch: app.fetch, port }, (info) => {
 	console.log(`headquarters-billing listening on :${info.port}`);
+	try {
+		loadEnv();
+		console.log('env ok');
+	} catch (err) {
+		console.warn('env incomplete — /health works; /v1/* will return 500 until vars are set');
+		console.warn(err instanceof Error ? err.message : err);
+	}
 });
