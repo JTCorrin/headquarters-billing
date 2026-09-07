@@ -2,3 +2,11 @@
 node_modules/
 dist/
 *.log
+
+# Local review evidence and generated reports
+/artifacts/
+/headquarters-launch-review/
+/coverage/
+/playwright-report/
+/STRIPE-E2E.md
+/CUTOVER.md

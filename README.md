@@ -2,36 +2,19 @@
 
 Railway-only Stripe billing service for **Headquarters Hosted**. Self-hosters do not run this.
 
-## Stripe (Corrin AI)
-
-| Item         | Value                                                                    |
-| ------------ | ------------------------------------------------------------------------ |
-| Account      | Corrin AI (`acct_1SZpNSBNNTLJiAPA`)                                      |
-| Product      | `prod_VAAkphL6K8P2Gn` — Headquarters Hosted                              |
-| Price (live) | `price_1U9qOkBNNTLJiAPAWERQRFic` — £10 GBP / month (`hq_hosted_monthly`) |
-
-The following Headquarters-specific configurations were verified on 2026-09-07:
-
-| Environment | Price | Customer portal configuration |
-| --- | --- | --- |
-| Live | `price_1U9qOkBNNTLJiAPAWERQRFic` | `bpc_1UD3tHBNNTLJiAPAIfxwp4Bk` |
-| Test | `price_1UD3xsBNNTLJiAPAfPuZ3dQ4` | `bpc_1UD3xsBNNTLJiAPAhIRFrPXs` |
-
-The test price is £10 GBP per month. Use test keys and an isolated database with the test
-configuration. The live portal ID is saved in Railway production with deployment skipped;
-it takes effect on the next deployment. The real test payment journey passed on 2026-09-07;
-see [the verification report](STRIPE-E2E.md) for evidence, scope, and cleanup.
-
 ## Endpoints
 
-| Method | Path                       | Purpose                                    |
-| ------ | -------------------------- | ------------------------------------------ |
-| `POST` | `/v1/checkout`             | Create Checkout Session → `{ url }`        |
-| `POST` | `/v1/webhooks/stripe`      | Stripe webhooks                            |
-| `GET`  | `/v1/claim?token=`         | Public claim lookup for CRM signup         |
-| `POST` | `/v1/claim`                | Claim after Auth signup (`x-claim-secret`) |
-| `GET`  | `/v1/entitlement?user_id=` | Entitlement check (`x-claim-secret`)       |
-| `GET`  | `/health`                  | Health                                     |
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/v1/checkout` | Create a hosted Checkout Session |
+| `POST` | `/v1/webhooks/stripe` | Receive signed Stripe events |
+| `GET` | `/v1/claim?token=` | Look up a signup claim |
+| `POST` | `/v1/claim` | Claim a payment using the shared secret and user bearer token |
+| `POST` | `/v1/recover` | Recover a payment using its checkout reference |
+| `POST` | `/v1/recover-email` | Recover payments using verified inbox proof |
+| `POST` | `/v1/portal` | Open the authenticated payer's customer portal |
+| `GET` | `/v1/entitlement?user_id=` | Check access using the shared secret |
+| `GET` | `/health` | Check service health |
 
 ## Env
 
@@ -40,7 +23,7 @@ PORT=8080
 STRIPE_SECRET_KEY=
 STRIPE_WEBHOOK_SECRET=
 STRIPE_PORTAL_CONFIGURATION=
-STRIPE_PRICE_HQ_HOSTED=price_1U9qOkBNNTLJiAPAWERQRFic
+STRIPE_PRICE_HQ_HOSTED=      # recurring price in the same Stripe environment as the key
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 CRM_URL=https://app.example.com
@@ -52,7 +35,9 @@ CORS_ORIGINS=               # optional comma list; defaults to CRM_URL,LANDING_U
 
 ## Webhook events
 
-`checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed`
+`checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+`checkout.session.async_payment_failed`, `customer.subscription.created`,
+`customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed`
 
 Endpoint: `https://<billing-host>/v1/webhooks/stripe`
 
@@ -65,9 +50,9 @@ pnpm dev
 
 ## Deploy
 
-Dockerfile included. Point Railway at this directory; set env vars; generate a public domain; register the webhook in Stripe (Corrin AI).
+Dockerfile included. Point Railway at this directory; set env vars; generate a public domain; register the webhook in Stripe.
 
-## Hosted launch deployment order
+## Deployment order
 
 1. Run the CRM migrations, including `20260907140000_hosted_billing_enforcement.sql`.
 2. On billing, set `CRM_URL=https://app.headquarters-crm.com`,
@@ -101,7 +86,10 @@ completed its PKCE email-link callback. In addition to the shared secret and bea
 a short-lived signed `recovery_proof` bound to that user and email. Billing rechecks the Stripe checkout
 and Headquarters price before recovering each matching payment; already-owned payments cannot be
 transferred to another user. Deploy billing before the matching CRM UI and configure Supabase's email
-callback allowlist and Magic Link delivery as described in the CRM's `docs/HOSTED-LAUNCH.md`.
+callback allowlist with the CRM origin's `/billing/email-callback` URL. The Supabase Magic Link
+template must use `{{ .ConfirmationURL }}` and custom SMTP must be configured. Recovery links
+must be opened in the same browser that requested them; the checkout-reference fallback remains
+available when the email flow cannot be completed.
 
 ## Verification
 
