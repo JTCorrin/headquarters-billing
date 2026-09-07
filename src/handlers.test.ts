@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import Stripe from "stripe";
@@ -37,6 +38,12 @@ function harness() {
     email: "buyer@example.test",
     price: "price_hq",
     portalCustomer: "cus_buyer",
+    rows: [
+      {
+        stripe_checkout_session_id: "cs_test_recover",
+        user_id: null as string | null,
+      },
+    ],
   };
   const verifier = new Stripe(env.stripeSecretKey);
   const stripe = {
@@ -112,7 +119,10 @@ function harness() {
         single: async () => ({ data: { id: "row" }, error: null }),
         update: () => q,
         delete: () => q,
-        eq: () => q,
+        eq: (key: string, value: unknown) => {
+          calls.push({ name: "filter", args: { key, value } });
+          return q;
+        },
         not: () => q,
         order: () => q,
         limit: () => q,
@@ -122,7 +132,8 @@ function harness() {
             : null,
           error: null,
         }),
-        then: (resolve: any) => Promise.resolve({ error: null }).then(resolve),
+        then: (resolve: any) =>
+          Promise.resolve({ data: state.rows, error: null }).then(resolve),
       };
       return q;
     },
@@ -333,31 +344,153 @@ test("portal rejects unauthenticated or unlinked users", async () => {
   assert.equal((await h.post("/v1/portal")).status, 404);
 });
 
-test('legacy CORS configuration still includes public customer-facing origins', () => {
- const previous = {...process.env};
- try {
- Object.assign(process.env, {
-  STRIPE_SECRET_KEY:'sk_test_config', STRIPE_WEBHOOK_SECRET:'whsec_config', STRIPE_PRICE_HQ_HOSTED:'price_hq',
-  SUPABASE_URL:'https://db.example.test', SUPABASE_SERVICE_ROLE_KEY:'local-test',
-  CLAIM_HMAC_SECRET:'hash', CLAIM_SHARED_SECRET:'shared', STRIPE_PORTAL_CONFIGURATION:'bpc_hq',
-  CRM_URL:'https://headquarters-production-a08d.up.railway.app',
-  LANDING_URL:'https://headquarters-web-production-3e78.up.railway.app',
-  CORS_ORIGINS:'https://headquarters-web-production-3e78.up.railway.app'
- });
- const env=loadEnv();
- assert.equal(env.crmUrl,'https://app.headquarters-crm.com');
- assert.ok(env.corsOrigins.includes('https://headquarters-crm.com'));
- assert.ok(env.corsOrigins.includes('https://app.headquarters-crm.com'));
- } finally {
- for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
- Object.assign(process.env,previous);
- }
+test("legacy CORS configuration still includes public customer-facing origins", () => {
+  const previous = { ...process.env };
+  try {
+    Object.assign(process.env, {
+      STRIPE_SECRET_KEY: "sk_test_config",
+      STRIPE_WEBHOOK_SECRET: "whsec_config",
+      STRIPE_PRICE_HQ_HOSTED: "price_hq",
+      SUPABASE_URL: "https://db.example.test",
+      SUPABASE_SERVICE_ROLE_KEY: "local-test",
+      CLAIM_HMAC_SECRET: "hash",
+      CLAIM_SHARED_SECRET: "shared",
+      STRIPE_PORTAL_CONFIGURATION: "bpc_hq",
+      CRM_URL: "https://headquarters-production-a08d.up.railway.app",
+      LANDING_URL: "https://headquarters-web-production-3e78.up.railway.app",
+      CORS_ORIGINS: "https://headquarters-web-production-3e78.up.railway.app",
+    });
+    const env = loadEnv();
+    assert.equal(env.crmUrl, "https://app.headquarters-crm.com");
+    assert.ok(env.corsOrigins.includes("https://headquarters-crm.com"));
+    assert.ok(env.corsOrigins.includes("https://app.headquarters-crm.com"));
+  } finally {
+    for (const key of Object.keys(process.env))
+      if (!(key in previous)) delete process.env[key];
+    Object.assign(process.env, previous);
+  }
 });
 
-test('invoice reconciliation supports existing and current webhook API versions', async () => {
- for (const invoice of [{subscription:'sub_hq'},{parent:{subscription_details:{subscription:'sub_hq'}}}]) {
-  const h=harness();
-  assert.equal((await h.webhook('invoice.payment_failed',invoice)).status,200);
-  assert.ok(h.calls.some(call=>call.name==='sync_hosted_subscription'));
- }
+test("invoice reconciliation supports existing and current webhook API versions", async () => {
+  for (const invoice of [
+    { subscription: "sub_hq" },
+    { parent: { subscription_details: { subscription: "sub_hq" } } },
+  ]) {
+    const h = harness();
+    assert.equal(
+      (await h.webhook("invoice.payment_failed", invoice)).status,
+      200,
+    );
+    assert.ok(h.calls.some((call) => call.name === "sync_hosted_subscription"));
+  }
+});
+
+function emailProof(
+  overrides: Record<string, unknown> = {},
+  secret = "local-shared",
+) {
+  const payload = Buffer.from(
+    JSON.stringify({
+      purpose: "headquarters-email-recovery",
+      userId: "buyer",
+      email: "buyer@example.test",
+      expiresAt: Math.floor(Date.now() / 1000) + 600,
+      ...overrides,
+    }),
+  ).toString("base64url");
+  return (
+    payload +
+    "." +
+    createHmac("sha256", secret).update(payload).digest("base64url")
+  );
+}
+
+test("email recovery requires a fresh signed inbox proof", async () => {
+  for (const proof of [
+    "",
+    emailProof({}, "wrong-key"),
+    emailProof({ expiresAt: 1 }),
+    emailProof({ purpose: "headquarters-email-challenge" }),
+    emailProof({ userId: "other" }),
+    emailProof({ email: "other@example.test" }),
+  ]) {
+    const { post, calls } = harness();
+    assert.equal(
+      (await post("/v1/recover-email", { recovery_proof: proof })).status,
+      403,
+    );
+    assert(!calls.some((c) => c.name === "recover_hosted_subscription"));
+  }
+});
+
+test("email recovery authenticates before using proof and ignores supplied email", async () => {
+  const { post, calls } = harness();
+  assert.equal(
+    (await post("/v1/recover-email", { recovery_proof: emailProof() }, false))
+      .status,
+    401,
+  );
+  const response = await post("/v1/recover-email", {
+    recovery_proof: emailProof(),
+    email: "someone-else@example.test",
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, recovered: 1 });
+  assert(
+    calls.some(
+      (c) =>
+        c.name === "filter" &&
+        c.args.key === "email" &&
+        c.args.value === "buyer@example.test",
+    ),
+  );
+  assert(
+    calls.some(
+      (c) =>
+        c.name === "recover_hosted_subscription" &&
+        c.args.p_email === "buyer@example.test",
+    ),
+  );
+});
+
+test("email recovery rechecks Stripe completion, price, email, and ownership", async () => {
+  for (const kind of [
+    "incomplete",
+    "wrong-email",
+    "different-owner",
+    "inactive",
+    "wrong-price",
+  ]) {
+    const { post, state, calls } = harness();
+    if (kind === "incomplete") state.sessionStatus = "open";
+    if (kind === "wrong-email") state.email = "other@example.test";
+    if (kind === "different-owner") state.rows[0].user_id = "other";
+    if (kind === "inactive") state.claim = { ok: false, id: "row" };
+    if (kind === "wrong-price") state.price = "price_other_product";
+    assert.equal(
+      (await post("/v1/recover-email", { recovery_proof: emailProof() }))
+        .status,
+      404,
+    );
+    if (kind !== "inactive")
+      assert(!calls.some((c) => c.name === "recover_hosted_subscription"));
+  }
+});
+
+test("email recovery fails closed on database failure and limits discovery", async () => {
+  const { post, state } = harness();
+  state.rpcError = { message: "down" };
+  assert.equal(
+    (await post("/v1/recover-email", { recovery_proof: emailProof() })).status,
+    502,
+  );
+  state.rpcError = null;
+  state.rows = Array.from({ length: 21 }, () => ({
+    stripe_checkout_session_id: "cs_test_many",
+    user_id: null,
+  }));
+  assert.equal(
+    (await post("/v1/recover-email", { recovery_proof: emailProof() })).status,
+    409,
+  );
 });

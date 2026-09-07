@@ -96,6 +96,13 @@ completed Checkout Session reference and a matching signed-in email; email alone
 The portal remains available for canceled subscriptions. Do not tell an existing payer to repurchase
 to recover a missing/expired signup link.
 
+`POST /v1/recover-email` discovers payments for the authenticated email only after the CRM has
+completed its PKCE email-link callback. In addition to the shared secret and bearer token, it requires
+a short-lived signed `recovery_proof` bound to that user and email. Billing rechecks the Stripe checkout
+and Headquarters price before recovering each matching payment; already-owned payments cannot be
+transferred to another user. Deploy billing before the matching CRM UI and configure Supabase's email
+callback allowlist and Magic Link delivery as described in the CRM's `docs/HOSTED-LAUNCH.md`.
+
 ## Verification
 
 `pnpm test` runs isolated handler tests without external credentials. The CRM pgTAP suite covers

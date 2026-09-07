@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import type { Context } from "hono";
 import type Stripe from "stripe";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -116,9 +117,9 @@ export async function syncSubscription(
       (item) => item.price.id === c.get("env").stripePriceHqHosted,
     )
   )
-    return;
+    return false;
   const hostedId = sub.metadata.hosted_subscription_id;
-  if (!hostedId) return; // This Stripe account can contain unrelated products.
+  if (!hostedId) return false; // This Stripe account can contain unrelated products.
   if (
     checkout &&
     (checkout.metadata?.hosted_subscription_id !== hostedId ||
@@ -137,14 +138,16 @@ export async function syncSubscription(
       checkout?.customer_details?.email ?? checkout?.customer_email ?? null,
   });
   if (error) throw new Error("Subscription synchronization failed");
+  return true;
 }
 async function syncCheckout(c: C, session: Stripe.Checkout.Session) {
-  if (session.mode !== "subscription" || session.status !== "complete") return;
+  if (session.mode !== "subscription" || session.status !== "complete")
+    return false;
   const id =
     typeof session.subscription === "string"
       ? session.subscription
       : session.subscription?.id;
-  if (id) await syncSubscription(c, id, session);
+  return id ? syncSubscription(c, id, session) : false;
 }
 export async function handleStripeWebhook(c: C) {
   const signature = c.req.header("stripe-signature");
@@ -186,7 +189,9 @@ export async function handleStripeWebhook(c: C) {
         subscription?: string | Stripe.Subscription | null;
       };
       // Existing webhook endpoints can retain an older account API version.
-      const sub = invoice.parent?.subscription_details?.subscription ?? invoice.subscription;
+      const sub =
+        invoice.parent?.subscription_details?.subscription ??
+        invoice.subscription;
       const id = typeof sub === "string" ? sub : sub?.id;
       if (id) await syncSubscription(c, id);
       break;
@@ -206,11 +211,9 @@ type Claim = {
   stripe_checkout_session_id?: string | null;
 };
 async function readClaim(c: C, token: string): Promise<Claim | null> {
-  const { data, error } = await c
-    .get("supabase")
-    .rpc("lookup_hosted_claim", {
-      p_claim_token_hash: hashClaimToken(token, c.get("env").claimHmacSecret),
-    });
+  const { data, error } = await c.get("supabase").rpc("lookup_hosted_claim", {
+    p_claim_token_hash: hashClaimToken(token, c.get("env").claimHmacSecret),
+  });
   if (error) throw new Error("Claim lookup unavailable");
   return data;
 }
@@ -293,7 +296,13 @@ export async function recoverSubscription(c: C) {
       { error: "No completed checkout matching this account" },
       403,
     );
-  await syncCheckout(c, session);
+  if (!(await syncCheckout(c, session)))
+    return c.json(
+      {
+        error: "No completed Headquarters subscription matching this checkout",
+      },
+      403,
+    );
   const { data, error } = await c
     .get("supabase")
     .rpc("recover_hosted_subscription", {
@@ -309,12 +318,100 @@ export async function recoverSubscription(c: C) {
     );
   return c.json({ ok: true });
 }
+/** Accept only a short-lived inbox proof issued by the CRM's completed PKCE email callback. */
+export async function recoverSubscriptionsByEmail(c: C) {
+  const user = await authenticatedUser(c);
+  if (!user) return c.json({ error: "Not authenticated" }, 401);
+  const input = await body(c);
+  const proof = string(input?.recovery_proof);
+  let valid = false;
+  try {
+    const parts = proof.split(".");
+    if (parts.length !== 2 || proof.length > 4096)
+      throw new Error("Invalid proof");
+    const signature = createHmac("sha256", c.get("env").claimSharedSecret)
+      .update(parts[0])
+      .digest("base64url");
+    if (!safeEqualString(signature, parts[1])) throw new Error("Invalid proof");
+    const verified = JSON.parse(
+      Buffer.from(parts[0], "base64url").toString("utf8"),
+    );
+    const now = Math.floor(Date.now() / 1000);
+    valid =
+      verified.purpose === "headquarters-email-recovery" &&
+      verified.userId === user.id &&
+      normalizeEmail(verified.email ?? "") === normalizeEmail(user.email!) &&
+      Number.isInteger(verified.expiresAt) &&
+      verified.expiresAt > now &&
+      verified.expiresAt <= now + 600;
+  } catch {
+    /* Untrusted, missing or expired proof. */
+  }
+  if (!valid)
+    return c.json(
+      {
+        error:
+          "Open a fresh recovery email link before recovering your subscription.",
+      },
+      403,
+    );
+  const db = c.get("supabase");
+  const { data: rows, error } = await db
+    .from("hosted_subscriptions")
+    .select("stripe_checkout_session_id,user_id")
+    .eq("email", normalizeEmail(user.email!))
+    .not("stripe_checkout_session_id", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(21);
+  if (error) throw new Error("Payment lookup unavailable");
+  if ((rows?.length ?? 0) > 20)
+    return c.json(
+      {
+        error:
+          "Please use a checkout reference to recover this account's payments.",
+      },
+      409,
+    );
+  let recovered = 0;
+  for (const row of rows ?? []) {
+    if (row.user_id && row.user_id !== user.id) continue;
+    const session = await c
+      .get("stripe")
+      .checkout.sessions.retrieve(row.stripe_checkout_session_id);
+    const email = session.customer_details?.email ?? session.customer_email;
+    if (
+      session.status !== "complete" ||
+      session.mode !== "subscription" ||
+      !email ||
+      normalizeEmail(email) !== normalizeEmail(user.email!)
+    )
+      continue;
+    if (!(await syncCheckout(c, session))) continue;
+    const result = await db.rpc("recover_hosted_subscription", {
+      p_checkout_id: session.id,
+      p_user_id: user.id,
+      p_email: normalizeEmail(user.email!),
+    });
+    if (result.error) throw new Error("Payment recovery unavailable");
+    if (result.data?.ok) recovered++;
+  }
+  if (!recovered)
+    return c.json(
+      {
+        error:
+          "No recoverable hosted payment was found for this email. Sign in with the email used at checkout, or use your checkout reference.",
+      },
+      404,
+    );
+  return c.json({ ok: true, recovered });
+}
+
 export async function createPortalSession(c: C) {
   const user = await authenticatedUser(c);
   if (!user) return c.json({ error: "Not authenticated" }, 401);
   const input = await body(c);
- const subscriptionId = string(input?.subscription_id);
- let query = c
+  const subscriptionId = string(input?.subscription_id);
+  let query = c
     .get("supabase")
     .from("hosted_subscriptions")
     .select("stripe_customer_id")
@@ -331,13 +428,11 @@ export async function createPortalSession(c: C) {
       404,
     );
   const env = c.get("env");
-  const session = await c
-    .get("stripe")
-    .billingPortal.sessions.create({
-      customer: data.stripe_customer_id,
-      configuration: env.stripePortalConfiguration,
-      return_url: `${env.crmUrl}/billing`,
-    });
+  const session = await c.get("stripe").billingPortal.sessions.create({
+    customer: data.stripe_customer_id,
+    configuration: env.stripePortalConfiguration,
+    return_url: `${env.crmUrl}/billing`,
+  });
   return c.json({ url: session.url });
 }
 export async function entitlementForUser(c: C) {

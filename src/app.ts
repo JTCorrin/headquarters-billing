@@ -9,6 +9,7 @@ import {
   entitlementForUser,
   createPortalSession,
   recoverSubscription,
+  recoverSubscriptionsByEmail,
   initContext,
   type AppBindings,
 } from "./handlers.js";
@@ -38,6 +39,7 @@ export function createApp(initialize = initContext) {
   app.get("/v1/claim", lookupClaim);
   app.post("/v1/claim", claimSubscription);
   app.post("/v1/recover", recoverSubscription);
+  app.post("/v1/recover-email", recoverSubscriptionsByEmail);
   app.post("/v1/portal", createPortalSession);
   app.get("/v1/entitlement", entitlementForUser);
   app.onError((error, c) => {
