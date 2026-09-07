@@ -19,7 +19,8 @@ The following Headquarters-specific configurations were verified on 2026-09-07:
 
 The test price is £10 GBP per month. Use test keys and an isolated database with the test
 configuration. The live portal ID is saved in Railway production with deployment skipped;
-it takes effect on the next deployment. Real payment E2E verification remains pending.
+it takes effect on the next deployment. The real test payment journey passed on 2026-09-07;
+see [the verification report](STRIPE-E2E.md) for evidence, scope, and cleanup.
 
 ## Endpoints
 
