@@ -353,3 +353,11 @@ test('legacy CORS configuration still includes public customer-facing origins', 
  Object.assign(process.env,previous);
  }
 });
+
+test('invoice reconciliation supports existing and current webhook API versions', async () => {
+ for (const invoice of [{subscription:'sub_hq'},{parent:{subscription_details:{subscription:'sub_hq'}}}]) {
+  const h=harness();
+  assert.equal((await h.webhook('invoice.payment_failed',invoice)).status,200);
+  assert.ok(h.calls.some(call=>call.name==='sync_hosted_subscription'));
+ }
+});

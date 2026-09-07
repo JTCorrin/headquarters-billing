@@ -182,8 +182,11 @@ export async function handleStripeWebhook(c: C) {
       break;
     case "invoice.paid":
     case "invoice.payment_failed": {
-      const invoice = event.data.object as Stripe.Invoice;
-      const sub = invoice.parent?.subscription_details?.subscription;
+      const invoice = event.data.object as Stripe.Invoice & {
+        subscription?: string | Stripe.Subscription | null;
+      };
+      // Existing webhook endpoints can retain an older account API version.
+      const sub = invoice.parent?.subscription_details?.subscription ?? invoice.subscription;
       const id = typeof sub === "string" ? sub : sub?.id;
       if (id) await syncSubscription(c, id);
       break;
