@@ -10,7 +10,16 @@ Railway-only Stripe billing service for **Headquarters Hosted**. Self-hosters do
 | Product      | `prod_VAAkphL6K8P2Gn` — Headquarters Hosted                              |
 | Price (live) | `price_1U9qOkBNNTLJiAPAWERQRFic` — £10 GBP / month (`hq_hosted_monthly`) |
 
-Create a matching **test-mode** product/price in the Dashboard (test toggle) and use that price ID with `sk_test_…` keys for staging.
+The following Headquarters-specific configurations were verified on 2026-09-07:
+
+| Environment | Price | Customer portal configuration |
+| --- | --- | --- |
+| Live | `price_1U9qOkBNNTLJiAPAWERQRFic` | `bpc_1UD3tHBNNTLJiAPAIfxwp4Bk` |
+| Test | `price_1UD3xsBNNTLJiAPAfPuZ3dQ4` | `bpc_1UD3xsBNNTLJiAPAhIRFrPXs` |
+
+The test price is £10 GBP per month. Use test keys and an isolated database with the test
+configuration. The live portal ID is saved in Railway production with deployment skipped;
+it takes effect on the next deployment. Real payment E2E verification remains pending.
 
 ## Endpoints
 
@@ -29,6 +38,7 @@ Create a matching **test-mode** product/price in the Dashboard (test toggle) and
 PORT=8080
 STRIPE_SECRET_KEY=
 STRIPE_WEBHOOK_SECRET=
+STRIPE_PORTAL_CONFIGURATION=
 STRIPE_PRICE_HQ_HOSTED=price_1U9qOkBNNTLJiAPAWERQRFic
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
